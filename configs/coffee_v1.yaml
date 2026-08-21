@@ -1,0 +1,168 @@
+# AgroVisión — receta de entrenamiento «coffee_v1»
+#
+# Primer modelo real del proyecto. Sustituye al portado de Teachable Machine
+# (ADR-014), que no tenía cabeza de embedding y por tanto no permitía ni
+# detección de fuera de distribución ni agrupación por similitud.
+#
+# Fuente de datos: JMuBEN + JMuBEN2 (Jepkoech, Kenduiywo, Mugo, Chebet · 2021)
+# 58 555 imágenes de café arábica tomadas en la plantación Mutira, condado de
+# Kirinyaga, Kenia, etiquetadas con acompañamiento de un patólogo.
+# Licencia CC BY 4.0 — la atribución viaja en `metrics.json` y en el catálogo.
+
+version: "1.0.0"
+channel: "draft"          # nunca se publica directo a producción (§13.5)
+seed: 20260814            # fijo: dos corridas iguales dan el mismo reparto
+
+# ── Datos ────────────────────────────────────────────────────────────────────
+data:
+  # Los dos DOI de Mendeley. Se descargan sin credenciales.
+  sources:
+    - dataset_id: "t2r6rszp5c"     # JMuBEN  — Cercospora, Roya, Phoma
+    - dataset_id: "tgv3zb82nd"     # JMuBEN2 — Minador, Sana
+  image_size: 224
+  # Reparto por clase, no global: con 6 572 imágenes de Phoma y 18 985 de sanas,
+  # un reparto global dejaría clases enteras fuera de validación por azar.
+  split:
+    train: 0.70
+    val:   0.15
+    test:  0.15
+
+# ── Clases ───────────────────────────────────────────────────────────────────
+#
+# El orden de esta lista ES el orden de los logits. Reordenarla sin reentrenar
+# hace que el modelo diga «roya» donde el grafo dice «minador», sin ningún error
+# visible. Por eso `labels.json` se genera desde aquí y nunca se edita a mano.
+#
+#   source_dir : nombre de la carpeta dentro del zip (incluye la errata original
+#                «Cerscospora», que está así en el dataset publicado)
+#   class_id   : identificador estable del modelo
+#   pest_id    : vínculo con el catálogo de la app; `null` si no es una plaga
+classes:
+  - source_dir: "Leaf rust"
+    class_id: "Enfermedad_Roya"
+    display_name: "Roya del café"
+    pest_id: "Enfermedad_Roya"
+
+  - source_dir: "Cerscospora"
+    class_id: "Enfermedad_ManchadeHierro"
+    display_name: "Mancha de hierro"
+    pest_id: "Enfermedad_ManchadeHierro"
+
+  - source_dir: "Phoma"
+    class_id: "Enfermedad_Phoma"
+    display_name: "Quema del cogollo (Phoma)"
+    pest_id: "Enfermedad_Phoma"
+
+  - source_dir: "Miner"
+    class_id: "Plaga_Minador"
+    display_name: "Minador de la hoja"
+    pest_id: "Plaga_Minador"
+
+  # Clase de referencia, no de plaga. Que el modelo pueda decir «esta hoja está
+  # bien» es tan importante como que sepa nombrar una lesión: sin ella, toda
+  # foto de una planta sana se reparte entre las cuatro enfermedades.
+  - source_dir: "Healthy"
+    class_id: "Sana"
+    display_name: "Hoja sana"
+    pest_id: null
+
+# ── Modelo ───────────────────────────────────────────────────────────────────
+model:
+  # Preentrenado con ImageNet: 1,28 millones de imágenes y 1 000 categorías. No
+  # se entrena desde cero — se hereda un extractor que ya sabe qué es un borde,
+  # una textura y una nervadura, y solo se le enseña café encima.
+  backbone: "MobileNetV3Large"
+  # §13.1 admite entre 128 y 256. Se elige el extremo bajo, y no por capricho:
+  # la matriz de precisión que viaja en calibration.json es d×d, así que pasar de
+  # 256 a 128 la reduce de 1 MB a 276 KB de descarga —sobre datos móviles en zona
+  # rural— y baja de 65 536 a 16 384 las multiplicaciones de Mahalanobis por
+  # inferencia. Con cinco clases, 128 dimensiones sobran de largo, y la
+  # covarianza compartida queda mejor condicionada al estimar cuatro veces menos
+  # parámetros con las mismas 58 555 imágenes.
+  embedding_dim: 128
+  dropout: 0.30
+  # Etiquetado suave: JMuBEN tiene lesiones ambiguas y solapadas. Sin esto la red
+  # sale sobreconfiada y la calibración por temperatura tiene que corregir
+  # demasiado, lo que degrada el margen entre la primera y la segunda clase.
+  label_smoothing: 0.05
+
+# ── Entrenamiento en dos etapas ──────────────────────────────────────────────
+training:
+  batch_size: 32
+  # Etapa 1 — el tronco congelado, solo aprende la cabeza. Rápido y estable:
+  # evita que los gradientes enormes de una cabeza recién inicializada destruyan
+  # los pesos preentrenados.
+  warmup:
+    epochs: 6
+    learning_rate: 0.001
+  # Etapa 2 — se descongela la parte alta del tronco con tasa baja. Es lo que
+  # adapta las últimas capas a la textura del café.
+  finetune:
+    epochs: 14
+    learning_rate: 0.00005
+    unfreeze_last_layers: 60
+  early_stopping_patience: 4
+  # Las clases están desbalanceadas 3:1 (18 985 sanas frente a 6 572 de Phoma).
+  # Sin pesos, la red aprende a decir «sana» y acierta el 32 % sin mirar nada.
+  class_weight: "balanced"
+
+# ── Aumentación ──────────────────────────────────────────────────────────────
+#
+# Todo lo que aquí se aplica simula una condición REAL de campo: el teléfono
+# torcido, el sol de mediodía, la sombra del propio productor, el pulso.
+# Deliberadamente NO se altera el tono: el color de la lesión es el síntoma.
+#
+# ⚠️ BRECHA DE DOMINIO CONOCIDA — leer antes de tocar `zoom`.
+#
+# JMuBEN se publica **recortado a 128×128 pegado a la lesión**: los autores lo
+# hicieron para acelerar el entrenamiento evitando que la red aprendiera el
+# fondo. En campo, en cambio, el teléfono manda un recorte central de una foto de
+# 1280 px, y ahí la lesión ocupa una fracción del encuadre.
+#
+# Un modelo entrenado solo con primerísimos planos se desorienta ante un encuadre
+# más abierto. El `zoom` amplio de abajo es la contramedida: al alejar hasta un
+# 35 %, la red ve la lesión a escalas variadas y deja de depender de que ocupe
+# todo el cuadro.
+#
+# Es una mitigación, no una cura. La cura son fotos del piloto tomadas con el
+# teléfono que se va a usar (Fase 0 del CLAUDE.md, y ADR-016).
+augmentation:
+  horizontal_flip: true
+  vertical_flip: true
+  rotation: 0.15
+  zoom: 0.35          # ver la nota de arriba
+  brightness: 0.25    # sol de mediodía y sombra propia del productor
+  contrast: 0.20
+  hue: 0.0            # ⚠️ dejar en cero. El color ES el síntoma.
+
+# ── Calibración y compuertas (§13.2) ─────────────────────────────────────────
+calibration:
+  # Percentil de las puntuaciones OOD del conjunto de validación por debajo del
+  # cual se acepta. 0.95 ⇒ se sacrifica un 5 % de aciertos para no inventar.
+  # En un cultivo, un falso negativo cuesta una revisión; un falso positivo con
+  # confianza alta cuesta una aplicación de fungicida innecesaria.
+  ood_percentile: 0.95
+  # Peso de la energía frente a Mahalanobis en la puntuación combinada.
+  energy_weight: 0.5
+  # Confianza mínima y margen mínimo entre primera y segunda clase.
+  min_confidence: 0.55
+  min_margin: 0.12
+
+# ── Criterios de aceptación (§13.1) ──────────────────────────────────────────
+#
+# El pipeline FALLA si no se cumplen. Un modelo que no llega no se firma, y sin
+# firma la app no lo instala. La compuerta es de construcción, no de criterio.
+acceptance:
+  min_macro_f1: 0.85
+  min_class_f1: 0.75
+  min_ood_auroc: 0.85
+  max_int8_f1_drop: 0.015     # pérdida tolerada por la cuantización
+  max_size_mb: 12.0
+
+# ── Exportación ──────────────────────────────────────────────────────────────
+export:
+  quantization: "int8"
+  # Imágenes del conjunto de entrenamiento que alimentan al calibrador de rangos
+  # del cuantizador. Pocas producen saturación; muchas no mejoran nada.
+  representative_samples: 300
+  parity_tolerance: 0.05      # diferencia máxima Keras ↔ TFLite en probabilidad

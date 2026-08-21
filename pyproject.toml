@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agrovision-ml"
+version = "1.0.0"
+description = "Entrenamiento, calibración, exportación y firma de los modelos de AgroVisión"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Diego Fernando Calderón Silva" }]
+
+# ⚠️ Versiones acotadas por arriba a propósito.
+#
+# El converter de TFLite y el runtime empaquetado en la app tienen que hablar el
+# mismo dialecto de FlatBuffer. Un `tensorflow` más nuevo que el runtime de
+# LiteRT del APK produce un .tflite que el teléfono rechaza al abrir — y el
+# síntoma llega en campo, no aquí.
+dependencies = [
+    "tensorflow>=2.16,<2.20",
+    "numpy>=1.26,<3",
+    "pillow>=10.2",
+    "scikit-learn>=1.4",
+    "typer>=0.12",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+    "cryptography>=42.0",
+    "requests>=2.31",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.9"]
+
+[project.scripts]
+agrovision-ml = "agrovision_ml.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

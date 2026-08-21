@@ -1,0 +1,23 @@
+# Entorno virtual: se recrea con `python -m venv .venv && pip install -e '.[dev]'`
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── Datos y artefactos: NO van a Git ──
+#
+# JMuBEN son 1,75 GB que se redescargan con `agrovision-ml download`. Git no es
+# un gestor de datasets: un binario de 200 MB queda en el historial para siempre
+# aunque después se borre, y el clon pasa a costar esos 200 MB a cada persona.
+data/
+artifacts/
+
+# ⚠️ La clave PRIVADA de firma de modelos NUNCA entra al repositorio (§15.6).
+# Si alguna vez aparece aquí, hay que ROTARLA, no solo borrar el archivo: si
+# estuvo en un commit, sigue en el historial y hay que asumirla comprometida.
+*.pem
+model_signing_private*
