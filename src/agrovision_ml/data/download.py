@@ -18,6 +18,7 @@ presente es un `.zip` íntegro.
 from __future__ import annotations
 
 import shutil
+import time
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -32,6 +33,14 @@ console = Console()
 _API = "https://data.mendeley.com/public-api/datasets/{dataset_id}/files"
 _TIMEOUT = (15, 120)  # (conexión, lectura entre bytes)
 _CHUNK = 1 << 20  # 1 MiB
+_REINTENTOS = 4
+
+# Mendeley rechaza peticiones sin `User-Agent` reconocible, y a veces también por
+# origen. Se identifica el cliente honestamente: no se suplanta un navegador.
+_CABECERAS = {
+    "User-Agent": "agrovision-ml/1.0 (+https://github.com/diegokld30/coffeApp-ml)",
+    "Accept": "application/json, application/octet-stream",
+}
 
 
 class DownloadError(RuntimeError):
@@ -51,18 +60,36 @@ class RemoteFile:
 
 
 def list_files(dataset_id: str) -> list[RemoteFile]:
-    """Consulta el índice público del dataset."""
-    response = requests.get(
-        _API.format(dataset_id=dataset_id),
-        params={"folder_id": "root", "version": "1"},
-        timeout=_TIMEOUT,
-    )
-    if response.status_code != 200:
-        raise DownloadError(
-            f"Mendeley respondió {response.status_code} para {dataset_id}. "
-            "Si persiste, descarga los zip a mano desde "
-            f"https://data.mendeley.com/datasets/{dataset_id}/1 y colócalos en data/raw/."
+    """Consulta el índice público del dataset, con reintentos.
+
+    Se reintenta ante 403, 429 y 5xx con espera creciente: Mendeley limita por
+    tasa y a veces responde 403 de forma transitoria.
+    """
+    espera = 2.0
+    response = None
+
+    for intento in range(1, _REINTENTOS + 1):
+        response = requests.get(
+            _API.format(dataset_id=dataset_id),
+            params={"folder_id": "root", "version": "1"},
+            headers=_CABECERAS,
+            timeout=_TIMEOUT,
         )
+        if response.status_code == 200:
+            break
+        if response.status_code not in (403, 429, 500, 502, 503, 504):
+            break
+        if intento < _REINTENTOS:
+            console.print(
+                f"  [yellow]HTTP {response.status_code}, reintento {intento}/{_REINTENTOS - 1} "
+                f"en {espera:.0f}s[/]"
+            )
+            time.sleep(espera)
+            espera *= 2
+
+    assert response is not None
+    if response.status_code != 200:
+        raise DownloadError(_explicar_fallo(response.status_code, dataset_id))
 
     files: list[RemoteFile] = []
     for entry in response.json():
@@ -83,6 +110,38 @@ def list_files(dataset_id: str) -> list[RemoteFile]:
     return files
 
 
+def _explicar_fallo(codigo: int, dataset_id: str) -> str:
+    """Mensaje accionable. Un error que solo dice el código no ayuda a nadie."""
+    base = f"Mendeley respondió {codigo} para {dataset_id}."
+
+    if codigo != 403:
+        return (
+            f"{base} Vuelve a intentarlo en unos minutos. Si persiste, descarga los "
+            f"zip a mano desde https://data.mendeley.com/datasets/{dataset_id}/1 "
+            "y colócalos en data/raw/."
+        )
+
+    # El 403 desde Colab, Kaggle o cualquier nube es lo habitual: Elsevier bloquea
+    # rangos de centro de datos. Desde una conexión doméstica el mismo código
+    # funciona sin tocar nada, así que el mensaje tiene que decir eso.
+    return (
+        f"{base}\n\n"
+        "Un 403 aquí casi siempre significa que Mendeley está bloqueando la IP de "
+        "origen, no que haya un problema con el dataset ni con tus credenciales.\n"
+        "Elsevier bloquea rangos de centros de datos, así que Colab, Kaggle y "
+        "cualquier máquina en la nube reciben 403 mientras que una conexión "
+        "doméstica descarga sin problema.\n\n"
+        "QUÉ HACER — descargar en tu computador y subir los zip:\n\n"
+        "  1. Desde tu máquina (no desde la nube):\n"
+        "       agrovision-ml download\n\n"
+        "  2. Sube los cinco .zip de data/raw/ a Google Drive, en\n"
+        "       MyDrive/agrovision/raw/\n\n"
+        "  3. Vuelve a ejecutar esta celda. El descargador ve los archivos ya\n"
+        "     presentes y pasa directo a descomprimir.\n\n"
+        f"Enlaces directos: https://data.mendeley.com/datasets/{dataset_id}/1"
+    )
+
+
 def _download_one(remote: RemoteFile, destination: Path) -> Path:
     final = destination / remote.filename
     if final.exists() and final.stat().st_size > 0:
@@ -95,6 +154,8 @@ def _download_one(remote: RemoteFile, destination: Path) -> Path:
     headers = {}
     if downloaded:
         headers["Range"] = f"bytes={downloaded}-"
+
+    headers.update(_CABECERAS)
 
     with requests.get(remote.url, stream=True, timeout=_TIMEOUT, headers=headers) as response:
         # 206 = reanudó donde se quedó. 200 con Range pedido = el servidor lo
