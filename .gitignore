@@ -13,8 +13,14 @@ __pycache__/
 # JMuBEN son 1,75 GB que se redescargan con `agrovision-ml download`. Git no es
 # un gestor de datasets: un binario de 200 MB queda en el historial para siempre
 # aunque después se borre, y el clon pasa a costar esos 200 MB a cada persona.
-data/
-artifacts/
+#
+# ⚠️ LA BARRA INICIAL ES OBLIGATORIA. Un patrón como `data/` coincide a
+# CUALQUIER profundidad, así que se llevaba también `src/agrovision_ml/data/`
+# —el paquete con el descargador y la canalización tf.data— y el repositorio se
+# publicaba sin él. En local todo seguía funcionando; solo reventaba al clonar,
+# con un `ModuleNotFoundError` en la primera ejecución.
+/data/
+/artifacts/
 
 # ⚠️ La clave PRIVADA de firma de modelos NUNCA entra al repositorio (§15.6).
 # Si alguna vez aparece aquí, hay que ROTARLA, no solo borrar el archivo: si
